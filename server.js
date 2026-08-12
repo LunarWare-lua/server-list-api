@@ -1,3 +1,4 @@
+```javascript
 "use strict";
 
 const express = require("express");
@@ -5,57 +6,50 @@ const express = require("express");
 const app = express();
 
 app.disable("x-powered-by");
-app.use(express.json({ limit: "256kb" }));
+app.use(express.json({ limit: "512kb" }));
 
 const PORT = Number(process.env.PORT || 10000);
-
-/*
- * ============================================================
- * CONFIG
- * ============================================================
- */
-
 const API_SECRET = process.env.API_SECRET;
 
 if (!API_SECRET) {
-    console.error("ERROR: API_SECRET environment variable is missing.");
+    console.error("Missing API_SECRET environment variable.");
     process.exit(1);
 }
 
-const ADMIN_LEVELS = {
-    // Example:
-    // "yourrobloxusername": 100
-};
+/*
+============================================================
+CONFIG
+============================================================
+*/
+
+const SERVER_TIMEOUT_MS = 30 * 1000;
+const RULE_TIMEOUT_MS = 10 * 60 * 1000;
+const INTENT_TIMEOUT_MS = 10 * 60 * 1000;
 
 /*
- * Servers expire automatically if they haven't sent a heartbeat.
- *
- * Change this if your Roblox heartbeat runs less frequently.
- */
-const SERVER_TIMEOUT_MS = 90 * 1000;
+============================================================
+STORAGE
 
-/*
- * ============================================================
- * MEMORY STORAGE
- * ============================================================
- *
- * IMPORTANT:
- * This is intentionally simple for the first deployment.
- *
- * If Render restarts the service, these Maps are cleared.
- * For a permanent production server list, move this storage
- * to PostgreSQL/Redis.
- */
+This is memory storage.
+
+IMPORTANT:
+Render restarting the service will clear these Maps.
+
+For a permanent production system, use PostgreSQL/Redis.
+============================================================
+*/
 
 const servers = new Map();
 const rules = new Map();
 const intents = new Map();
 
+let admins = {};
+
 /*
- * ============================================================
- * AUTHENTICATION
- * ============================================================
- */
+============================================================
+AUTH
+============================================================
+*/
 
 function authenticate(req, res, next) {
     const header = req.get("Authorization") || "";
@@ -66,9 +60,9 @@ function authenticate(req, res, next) {
         });
     }
 
-    const supplied = header.slice(7);
+    const token = header.slice(7);
 
-    if (supplied !== API_SECRET) {
+    if (token !== API_SECRET) {
         return res.status(401).json({
             error: "UNAUTHORIZED"
         });
@@ -78,30 +72,21 @@ function authenticate(req, res, next) {
 }
 
 /*
- * ============================================================
- * HELPERS
- * ============================================================
- */
+============================================================
+HELPERS
+============================================================
+*/
 
-function now() {
-    return Date.now();
+function stringValue(value, fallback = "") {
+    return typeof value === "string" ? value.trim() : fallback;
 }
 
-function cleanString(value, fallback = "") {
-    if (typeof value !== "string") {
-        return fallback;
-    }
-
-    return value.trim();
-}
-
-function cleanNumber(value, fallback = 0) {
+function numberValue(value, fallback = 0) {
     const n = Number(value);
-
     return Number.isFinite(n) ? n : fallback;
 }
 
-function cleanPlayerIds(value) {
+function playerIds(value) {
     if (!Array.isArray(value)) {
         return [];
     }
@@ -111,434 +96,393 @@ function cleanPlayerIds(value) {
         .filter(Number.isSafeInteger);
 }
 
-function cleanPlayerList(value) {
+function playerList(value) {
     if (!Array.isArray(value)) {
         return [];
     }
 
     return value
-        .filter(entry => entry && typeof entry === "object")
-        .slice(0, 100);
+        .filter(v => v && typeof v === "object")
+        .slice(0, 200);
 }
 
-function normalizeServer(data) {
-    const playerIds = cleanPlayerIds(data.playerIds);
-
-    return {
-        jobId: cleanString(data.jobId || data.serverId),
-        serverId: cleanString(data.serverId || data.jobId),
-
-        placeId: cleanNumber(data.placeId),
-
-        players: Math.max(
-            0,
-            cleanNumber(data.players, playerIds.length)
-        ),
-
-        playerIds,
-
-        playerList: cleanPlayerList(data.playerList),
-
-        maxPlayers: Math.max(
-            1,
-            cleanNumber(data.maxPlayers, 32)
-        ),
-
-        region: cleanString(data.region, "--"),
-
-        accessCode:
-            typeof data.accessCode === "string"
-                ? data.accessCode
-                : undefined,
-
-        gameMode:
-            data.gameMode === "Casual"
-                ? "Casual"
-                : "Standard",
-
-        vip: Boolean(data.vip),
-
-        vipOwner:
-            data.vipOwner === undefined ||
-            data.vipOwner === null
-                ? undefined
-                : cleanNumber(data.vipOwner),
-
-        map:
-            typeof data.map === "string"
-                ? data.map
-                : undefined,
-
-        rules:
-            data.rules &&
-            typeof data.rules === "object"
-                ? data.rules
-                : {},
-
-        prime: Boolean(data.prime),
-
-        lat: cleanNumber(data.lat, 0),
-        lon: cleanNumber(data.lon, 0),
-
-        updatedAt: now()
-    };
+function validMode(mode) {
+    return mode === "Standard" || mode === "Casual";
 }
 
-function removeExpiredServers() {
-    const cutoff = now() - SERVER_TIMEOUT_MS;
+function cleanup() {
+    const now = Date.now();
 
-    for (const [id, server] of servers) {
-        if (!server.updatedAt || server.updatedAt < cutoff) {
-            servers.delete(id);
+    /*
+    -------------------------
+    Servers
+    -------------------------
+    */
+
+    for (const [jobId, server] of servers) {
+        if (
+            !server.updatedAt ||
+            now - server.updatedAt > SERVER_TIMEOUT_MS
+        ) {
+            servers.delete(jobId);
         }
     }
+
+    /*
+    -------------------------
+    Rules
+    -------------------------
+    */
+
+    for (const [ticket, entry] of rules) {
+        if (
+            !entry.updatedAt ||
+            now - entry.updatedAt > RULE_TIMEOUT_MS
+        ) {
+            rules.delete(ticket);
+        }
+    }
+
+    /*
+    -------------------------
+    Intents
+    -------------------------
+    */
+
+    for (const [userId, entry] of intents) {
+        if (
+            !entry.updatedAt ||
+            now - entry.updatedAt > INTENT_TIMEOUT_MS
+        ) {
+            intents.delete(userId);
+        }
+    }
+}
+
+function normalizeServer(body) {
+    const ids = playerIds(body.playerIds);
+
+    const maxPlayers = Math.max(
+        1,
+        numberValue(body.maxPlayers, 32)
+    );
+
+    const players = Math.max(
+        0,
+        numberValue(body.players, ids.length)
+    );
+
+    return {
+        jobId: stringValue(body.jobId),
+        serverId: stringValue(
+            body.serverId || body.jobId
+        ),
+
+        placeId: numberValue(body.placeId),
+
+        privateServerId:
+            stringValue(body.privateServerId) || null,
+
+        accessCode:
+            stringValue(body.accessCode, "0"),
+
+        gameMode: validMode(body.gameMode)
+            ? body.gameMode
+            : "Standard",
+
+        playerIds: ids,
+
+        playerList: playerList(body.playerList),
+
+        players,
+
+        maxPlayers,
+
+        region:
+            stringValue(
+                body.region ||
+                body.countryCode,
+                "--"
+            ),
+
+        countryCode:
+            stringValue(
+                body.countryCode ||
+                body.region,
+                "--"
+            ),
+
+        lat: numberValue(body.lat, 0),
+        lon: numberValue(body.lon, 0),
+
+        vip: Boolean(body.vip),
+
+        vipOwner:
+            body.vipOwner === undefined ||
+            body.vipOwner === null
+                ? null
+                : numberValue(body.vipOwner),
+
+        map:
+            typeof body.map === "string"
+                ? body.map
+                : null,
+
+        prime:
+            body.prime === undefined
+                ? null
+                : Boolean(body.prime),
+
+        menuHide: Boolean(body.menuHide),
+
+        serverLocked: Boolean(body.serverLocked),
+
+        updateMigrating: Boolean(
+            body.updateMigrating
+        ),
+
+        rules:
+            body.rules &&
+            typeof body.rules === "object"
+                ? body.rules
+                : {},
+
+        updatedAt: Date.now()
+    };
 }
 
 function publicServer(server) {
     return {
         jobId: server.jobId,
         serverId: server.serverId,
+
         placeId: server.placeId,
-        players: server.players,
-        playerIds: server.playerIds,
-        playerList: server.playerList,
-        maxPlayers: server.maxPlayers,
-        region: server.region,
-        accessCode: server.accessCode,
-        gameMode: server.gameMode,
-        vip: server.vip,
-        vipOwner: server.vipOwner,
-        map: server.map,
-        rules: server.rules,
-        prime: server.prime,
-        lat: server.lat,
-        lon: server.lon
+
+        privateServerId:
+            server.privateServerId,
+
+        accessCode:
+            server.accessCode,
+
+        players:
+            server.players,
+
+        playerIds:
+            server.playerIds,
+
+        playerList:
+            server.playerList,
+
+        maxPlayers:
+            server.maxPlayers,
+
+        region:
+            server.region,
+
+        countryCode:
+            server.countryCode,
+
+        lat:
+            server.lat,
+
+        lon:
+            server.lon,
+
+        gameMode:
+            server.gameMode,
+
+        vip:
+            server.vip,
+
+        vipOwner:
+            server.vipOwner,
+
+        map:
+            server.map,
+
+        prime:
+            server.prime,
+
+        menuHide:
+            server.menuHide,
+
+        serverLocked:
+            server.serverLocked,
+
+        updateMigrating:
+            server.updateMigrating,
+
+        rules:
+            server.rules
     };
 }
 
 /*
- * ============================================================
- * HEALTH
- * ============================================================
- */
+============================================================
+HEALTH
+============================================================
+*/
 
 app.get("/", (req, res) => {
     res.json({
         ok: true,
         service: "Roblox Server List API",
-        version: "1.0.0"
+        version: "2.0.0"
     });
 });
 
 app.get("/health", (req, res) => {
+    cleanup();
+
     res.json({
         ok: true,
         servers: servers.size,
         rules: rules.size,
         intents: intents.size,
+        admins: Object.keys(admins).length,
         time: new Date().toISOString()
     });
 });
 
 /*
- * ============================================================
- * GET /v1/servers
- *
- * Used by:
- *
- * Net.List()
- *
- * Supports:
- *
- * ?vipOwner=123
- * ?includeVip=1
- * ============================================================
- */
+============================================================
+GET /v1/servers
 
-app.get("/v1/servers", authenticate, (req, res) => {
-    removeExpiredServers();
+Used by the ServerList hub/browser.
+============================================================
+*/
 
-    const includeVip =
-        req.query.includeVip === "1" ||
-        req.query.includeVip === "true";
+app.get(
+    "/v1/servers",
+    authenticate,
+    (req, res) => {
+        cleanup();
 
-    const vipOwner =
-        req.query.vipOwner !== undefined
-            ? Number(req.query.vipOwner)
-            : null;
+        const includeVip =
+            req.query.includeVip === "1" ||
+            req.query.includeVip === "true";
 
-    const result = [];
+        const vipOwner =
+            req.query.vipOwner !== undefined
+                ? Number(req.query.vipOwner)
+                : null;
 
-    for (const server of servers.values()) {
-        if (!server.jobId) {
-            continue;
+        const result = [];
+
+        for (const server of servers.values()) {
+
+            if (!server.jobId) {
+                continue;
+            }
+
+            /*
+            Hide VIP servers unless requested.
+            */
+
+            if (server.vip) {
+
+                if (!includeVip) {
+                    continue;
+                }
+
+                /*
+                If a specific VIP owner was requested,
+                only return that owner's VIP server.
+                */
+
+                if (
+                    vipOwner !== null &&
+                    Number(server.vipOwner) !== vipOwner
+                ) {
+                    continue;
+                }
+            }
+
+            result.push(
+                publicServer(server)
+            );
         }
 
         /*
-         * VIP servers are hidden unless the Roblox client
-         * specifically requests them.
-         */
-        if (server.vip) {
-            if (!includeVip) {
-                continue;
-            }
+        Active/populated servers first.
+        */
 
-            if (
-                vipOwner !== null &&
-                Number(server.vipOwner) !== vipOwner
-            ) {
-                continue;
-            }
-        }
+        result.sort((a, b) => {
+            return (
+                Number(b.players || 0) -
+                Number(a.players || 0)
+            );
+        });
 
-        result.push(publicServer(server));
+        res.json({
+            servers: result
+        });
     }
-
-    /*
-     * Put active servers first.
-     */
-    result.sort((a, b) => {
-        const aPlayers = Number(a.players || 0);
-        const bPlayers = Number(b.players || 0);
-
-        return bPlayers - aPlayers;
-    });
-
-    res.json({
-        servers: result
-    });
-});
+);
 
 /*
- * ============================================================
- * POST /v1/rules
- *
- * Used by:
- *
- * Net.PutRules(jobId, rules, placeId)
- *
- * The Roblox code uses the generated rulesTicket as jobId.
- * ============================================================
- */
+============================================================
+POST /v1/servers/heartbeat
 
-app.post("/v1/rules", authenticate, (req, res) => {
-    const body = req.body || {};
+Used by:
 
-    const jobId = cleanString(body.jobId);
-
-    if (!jobId) {
-        return res.status(400).json({
-            error: "MISSING_JOB_ID"
-        });
-    }
-
-    const placeId = cleanNumber(body.placeId);
-
-    if (!placeId) {
-        return res.status(400).json({
-            error: "MISSING_PLACE_ID"
-        });
-    }
-
-    const stored = {
-        jobId,
-        placeId,
-        rules:
-            body.rules &&
-            typeof body.rules === "object"
-                ? body.rules
-                : {},
-        createdAt: now(),
-        updatedAt: now()
-    };
-
-    rules.set(jobId, stored);
-
-    res.status(200).json({
-        ok: true,
-        jobId,
-        placeId
-    });
-});
-
-/*
- * ============================================================
- * POST /v1/intent
- *
- * Used by:
- *
- * Net.PutIntent(...)
- *
- * This stores the player's requested game mode and rules ticket.
- * ============================================================
- */
-
-app.post("/v1/intent", authenticate, (req, res) => {
-    const body = req.body || {};
-
-    const userId = cleanNumber(body.userId);
-
-    if (!userId) {
-        return res.status(400).json({
-            error: "MISSING_USER_ID"
-        });
-    }
-
-    const gameMode =
-        body.gameMode === "Casual"
-            ? "Casual"
-            : body.gameMode === "Standard"
-                ? "Standard"
-                : null;
-
-    if (!gameMode) {
-        return res.status(400).json({
-            error: "BAD_GAMEMODE"
-        });
-    }
-
-    const placeId = cleanNumber(body.placeId);
-
-    if (!placeId) {
-        return res.status(400).json({
-            error: "MISSING_PLACE_ID"
-        });
-    }
-
-    const rulesTicket =
-        body.rulesTicket !== undefined &&
-        body.rulesTicket !== null
-            ? cleanString(body.rulesTicket)
-            : null;
-
-    const key = `${userId}:${placeId}`;
-
-    const stored = {
-        userId,
-        placeId,
-        gameMode,
-        rulesTicket,
-        rules:
-            body.rules &&
-            typeof body.rules === "object"
-                ? body.rules
-                : {},
-        updatedAt: now()
-    };
-
-    intents.set(key, stored);
-
-    res.status(200).json({
-        ok: true,
-        userId,
-        gameMode,
-        rulesTicket
-    });
-});
-
-/*
- * ============================================================
- * DELETE /v1/servers/:jobId
- *
- * Used by:
- *
- * Net.Drop(jobId)
- *
- * Used when the VIP owner shuts down their server.
- * ============================================================
- */
-
-app.delete("/v1/servers/:jobId", authenticate, (req, res) => {
-    const jobId = cleanString(req.params.jobId);
-
-    if (!jobId) {
-        return res.status(400).json({
-            error: "MISSING_JOB_ID"
-        });
-    }
-
-    const existed = servers.delete(jobId);
-
-    res.status(200).json({
-        ok: true,
-        removed: existed,
-        jobId
-    });
-});
-
-/*
- * ============================================================
- * GET /v1/admins
- *
- * Used by:
- *
- * Net.GetAdmins()
- *
- * Roblox expects:
- *
- * {
- *     levelsByName = {
- *         username = 100
- *     }
- * }
- * ============================================================
- */
-
-app.get("/v1/admins", authenticate, (req, res) => {
-    res.json({
-        levelsByName: ADMIN_LEVELS
-    });
-});
-
-/*
- * ============================================================
- * INTERNAL SERVER REGISTRATION
- *
- * These endpoints are NOT called by the ServerListNet you sent.
- *
- * They are provided so a Roblox server heartbeat script can
- * register/update its server entry.
- * ============================================================
- */
-
-/*
- * POST /internal/servers/register
- */
-
-app.post("/internal/servers/register", authenticate, (req, res) => {
-    const body = req.body || {};
-
-    const server = normalizeServer(body);
-
-    if (!server.jobId) {
-        return res.status(400).json({
-            error: "MISSING_JOB_ID"
-        });
-    }
-
-    if (!server.placeId) {
-        return res.status(400).json({
-            error: "MISSING_PLACE_ID"
-        });
-    }
-
-    servers.set(server.jobId, server);
-
-    res.json({
-        ok: true,
-        server: publicServer(server)
-    });
-});
-
-/*
- * POST /internal/servers/:jobId/heartbeat
- */
+Net.Beat(payload)
+============================================================
+*/
 
 app.post(
-    "/internal/servers/:jobId/heartbeat",
+    "/v1/servers/heartbeat",
     authenticate,
     (req, res) => {
-        const jobId = cleanString(req.params.jobId);
+
+        cleanup();
+
+        const body = req.body || {};
+
+        const server =
+            normalizeServer(body);
+
+        if (!server.jobId) {
+            return res.status(400).json({
+                error: "MISSING_JOB_ID"
+            });
+        }
+
+        if (!server.placeId) {
+            return res.status(400).json({
+                error: "MISSING_PLACE_ID"
+            });
+        }
+
+        servers.set(
+            server.jobId,
+            server
+        );
+
+        res.json({
+            ok: true,
+            server: publicServer(server)
+        });
+    }
+);
+
+/*
+============================================================
+DELETE /v1/servers/:jobId
+
+Used by:
+
+Net.Drop(jobId)
+============================================================
+*/
+
+app.delete(
+    "/v1/servers/:jobId",
+    authenticate,
+    (req, res) => {
+
+        const jobId =
+            stringValue(req.params.jobId);
 
         if (!jobId) {
             return res.status(400).json({
@@ -546,108 +490,439 @@ app.post(
             });
         }
 
-        const existing = servers.get(jobId);
+        const removed =
+            servers.delete(jobId);
 
-        if (!existing) {
-            return res.status(404).json({
-                error: "SERVER_NOT_FOUND"
+        res.json({
+            ok: true,
+            removed,
+            jobId
+        });
+    }
+);
+
+/*
+============================================================
+POST /v1/rules
+
+Used by:
+
+Net.PutRules(jobId, rules, placeId)
+============================================================
+*/
+
+app.post(
+    "/v1/rules",
+    authenticate,
+    (req, res) => {
+
+        const body = req.body || {};
+
+        const ticket =
+            stringValue(body.jobId);
+
+        if (!ticket) {
+            return res.status(400).json({
+                error: "MISSING_RULES_TICKET"
             });
         }
 
-        const incoming = normalize({
-            ...existing,
-            ...req.body,
-            jobId
-        });
+        const placeId =
+            numberValue(body.placeId);
 
-        servers.set(jobId, incoming);
+        if (!placeId) {
+            return res.status(400).json({
+                error: "MISSING_PLACE_ID"
+            });
+        }
+
+        const value = {
+            jobId: ticket,
+
+            placeId,
+
+            rules:
+                body.rules &&
+                typeof body.rules === "object"
+                    ? body.rules
+                    : {},
+
+            updatedAt: Date.now()
+        };
+
+        rules.set(
+            ticket,
+            value
+        );
 
         res.json({
             ok: true,
-            server: publicServer(incoming)
+            jobId: ticket,
+            placeId
         });
     }
 );
 
 /*
- * DELETE /internal/servers/:jobId
- */
+============================================================
+GET /v1/rules/:jobId
 
-app.delete(
-    "/internal/servers/:jobId",
+Used by:
+
+Net.GetRules(jobId)
+============================================================
+*/
+
+app.get(
+    "/v1/rules/:jobId",
     authenticate,
     (req, res) => {
-        const jobId = cleanString(req.params.jobId);
 
-        const removed = servers.delete(jobId);
+        cleanup();
+
+        const ticket =
+            stringValue(req.params.jobId);
+
+        const entry =
+            rules.get(ticket);
+
+        if (!entry) {
+            return res.status(404).json({
+                error: "RULES_NOT_FOUND"
+            });
+        }
 
         res.json({
-            ok: true,
-            removed
+            jobId: entry.jobId,
+            placeId: entry.placeId,
+            rules: entry.rules
         });
     }
 );
 
 /*
- * ============================================================
- * CLEANUP
- * ============================================================
- */
+============================================================
+POST /v1/intent
 
-setInterval(() => {
-    removeExpiredServers();
+Used by:
 
-    /*
-     * Remove old rules after 10 minutes.
-     */
-    const rulesCutoff = now() - 10 * 60 * 1000;
+Net.PutIntent(...)
+============================================================
+*/
 
-    for (const [key, value] of rules) {
-        if (value.updatedAt < rulesCutoff) {
-            rules.delete(key);
+app.post(
+    "/v1/intent",
+    authenticate,
+    (req, res) => {
+
+        const body = req.body || {};
+
+        const userId =
+            numberValue(body.userId);
+
+        if (!userId) {
+            return res.status(400).json({
+                error: "MISSING_USER_ID"
+            });
         }
+
+        const mode =
+            stringValue(
+                body.gameMode,
+                "Standard"
+            );
+
+        if (!validMode(mode)) {
+            return res.status(400).json({
+                error: "BAD_GAMEMODE"
+            });
+        }
+
+        const placeId =
+            numberValue(body.placeId);
+
+        if (!placeId) {
+            return res.status(400).json({
+                error: "MISSING_PLACE_ID"
+            });
+        }
+
+        const ticket =
+            body.rulesTicket
+                ? stringValue(
+                    body.rulesTicket
+                )
+                : null;
+
+        const entry = {
+            userId,
+
+            gameMode:
+                mode,
+
+            rulesTicket:
+                ticket,
+
+            ticket:
+                ticket,
+
+            placeId,
+
+            rules:
+                body.rules &&
+                typeof body.rules === "object"
+                    ? body.rules
+                    : {},
+
+            updatedAt:
+                Date.now()
+        };
+
+        /*
+        One pending intent per user.
+        */
+
+        intents.set(
+            String(userId),
+            entry
+        );
+
+        res.json({
+            ok: true,
+            userId,
+            gameMode: mode,
+            rulesTicket: ticket
+        });
     }
+);
 
-    /*
-     * Remove old intents after 10 minutes.
-     */
-    const intentCutoff = now() - 10 * 60 * 1000;
+/*
+============================================================
+GET /v1/intent/:userId
 
-    for (const [key, value] of intents) {
-        if (value.updatedAt < intentCutoff) {
+Used by:
+
+Net.TakeIntent(userId)
+
+The Roblox code sends:
+
+?consume=1
+
+When consume=1, remove the intent after returning it.
+============================================================
+*/
+
+app.get(
+    "/v1/intent/:userId",
+    authenticate,
+    (req, res) => {
+
+        cleanup();
+
+        const userId =
+            numberValue(
+                req.params.userId
+            );
+
+        if (!userId) {
+            return res.status(400).json({
+                error: "BAD_USER_ID"
+            });
+        }
+
+        const key =
+            String(userId);
+
+        const entry =
+            intents.get(key);
+
+        if (!entry) {
+            return res.status(404).json({
+                error: "INTENT_NOT_FOUND"
+            });
+        }
+
+        const response = {
+            userId:
+                entry.userId,
+
+            gameMode:
+                entry.gameMode,
+
+            rulesTicket:
+                entry.rulesTicket,
+
+            ticket:
+                entry.ticket,
+
+            placeId:
+                entry.placeId,
+
+            rules:
+                entry.rules
+        };
+
+        if (
+            req.query.consume === "1" ||
+            req.query.consume === "true"
+        ) {
             intents.delete(key);
         }
+
+        res.json(response);
     }
-}, 30 * 1000);
+);
 
 /*
- * ============================================================
- * ERROR HANDLING
- * ============================================================
- */
+============================================================
+GET /v1/admins
 
-app.use((req, res) => {
-    res.status(404).json({
-        error: "NOT_FOUND"
-    });
-});
+Used by the Hub:
 
-app.use((err, req, res, next) => {
-    console.error(err);
+Net.GetAdmins()
+============================================================
+*/
 
-    res.status(500).json({
-        error: "INTERNAL_SERVER_ERROR"
-    });
-});
+app.get(
+    "/v1/admins",
+    authenticate,
+    (req, res) => {
+
+        res.json({
+            levelsByName:
+                admins
+        });
+    }
+);
 
 /*
- * ============================================================
- * START
- * ============================================================
- */
+============================================================
+PUT /v1/admins
 
-app.listen(PORT, "0.0.0.0", () => {
-    console.log(
-        `Roblox Server List API listening on port ${PORT}`
-    );
-});
+Used by the main game:
+
+Net.PutAdmins(levelsByName)
+============================================================
+*/
+
+app.put(
+    "/v1/admins",
+    authenticate,
+    (req, res) => {
+
+        const body =
+            req.body || {};
+
+        if (
+            !body.levelsByName ||
+            typeof body.levelsByName !== "object" ||
+            Array.isArray(body.levelsByName)
+        ) {
+            return res.status(400).json({
+                error: "INVALID_LEVELS"
+            });
+        }
+
+        const clean = {};
+
+        for (
+            const [name, level]
+            of Object.entries(
+                body.levelsByName
+            )
+        ) {
+
+            if (
+                typeof name !== "string" ||
+                name.trim() === ""
+            ) {
+                continue;
+            }
+
+            const numericLevel =
+                Number(level);
+
+            if (
+                !Number.isFinite(
+                    numericLevel
+                )
+            ) {
+                continue;
+            }
+
+            clean[
+                name.toLowerCase()
+            ] = numericLevel;
+        }
+
+        admins = clean;
+
+        res.json({
+            ok: true,
+            levelsByName: admins
+        });
+    }
+);
+
+/*
+============================================================
+CLEANUP LOOP
+============================================================
+*/
+
+setInterval(
+    cleanup,
+    10 * 1000
+);
+
+/*
+============================================================
+404
+============================================================
+*/
+
+app.use(
+    (req, res) => {
+        res.status(404).json({
+            error: "NOT_FOUND"
+        });
+    }
+);
+
+/*
+============================================================
+ERROR HANDLER
+============================================================
+*/
+
+app.use(
+    (err, req, res, next) => {
+
+        console.error(
+            "API ERROR:",
+            err
+        );
+
+        res.status(500).json({
+            error:
+                "INTERNAL_SERVER_ERROR"
+        });
+    }
+);
+
+/*
+============================================================
+START
+============================================================
+*/
+
+app.listen(
+    PORT,
+    "0.0.0.0",
+    () => {
+        console.log(
+            `Roblox Server List API running on port ${PORT}`
+        );
+    }
+);
+```
