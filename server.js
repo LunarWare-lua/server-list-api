@@ -15,40 +15,15 @@ if (!API_SECRET) {
     process.exit(1);
 }
 
-/*
-============================================================
-CONFIG
-============================================================
-*/
-
 const SERVER_TIMEOUT_MS = 30 * 1000;
 const RULE_TIMEOUT_MS = 10 * 60 * 1000;
 const INTENT_TIMEOUT_MS = 10 * 60 * 1000;
-
-/*
-============================================================
-STORAGE
-
-This is memory storage.
-
-IMPORTANT:
-Render restarting the service will clear these Maps.
-
-For a permanent production system, use PostgreSQL/Redis.
-============================================================
-*/
 
 const servers = new Map();
 const rules = new Map();
 const intents = new Map();
 
 let admins = {};
-
-/*
-============================================================
-AUTH
-============================================================
-*/
 
 function authenticate(req, res, next) {
     const header = req.get("Authorization") || "";
@@ -69,12 +44,6 @@ function authenticate(req, res, next) {
 
     next();
 }
-
-/*
-============================================================
-HELPERS
-============================================================
-*/
 
 function stringValue(value, fallback = "") {
     return typeof value === "string" ? value.trim() : fallback;
@@ -112,12 +81,6 @@ function validMode(mode) {
 function cleanup() {
     const now = Date.now();
 
-    /*
-    -------------------------
-    Servers
-    -------------------------
-    */
-
     for (const [jobId, server] of servers) {
         if (
             !server.updatedAt ||
@@ -127,12 +90,6 @@ function cleanup() {
         }
     }
 
-    /*
-    -------------------------
-    Rules
-    -------------------------
-    */
-
     for (const [ticket, entry] of rules) {
         if (
             !entry.updatedAt ||
@@ -141,12 +98,6 @@ function cleanup() {
             rules.delete(ticket);
         }
     }
-
-    /*
-    -------------------------
-    Intents
-    -------------------------
-    */
 
     for (const [userId, entry] of intents) {
         if (
@@ -173,6 +124,7 @@ function normalizeServer(body) {
 
     return {
         jobId: stringValue(body.jobId),
+
         serverId: stringValue(
             body.serverId || body.jobId
         ),
@@ -254,73 +206,28 @@ function publicServer(server) {
     return {
         jobId: server.jobId,
         serverId: server.serverId,
-
         placeId: server.placeId,
-
-        privateServerId:
-            server.privateServerId,
-
-        accessCode:
-            server.accessCode,
-
-        players:
-            server.players,
-
-        playerIds:
-            server.playerIds,
-
-        playerList:
-            server.playerList,
-
-        maxPlayers:
-            server.maxPlayers,
-
-        region:
-            server.region,
-
-        countryCode:
-            server.countryCode,
-
-        lat:
-            server.lat,
-
-        lon:
-            server.lon,
-
-        gameMode:
-            server.gameMode,
-
-        vip:
-            server.vip,
-
-        vipOwner:
-            server.vipOwner,
-
-        map:
-            server.map,
-
-        prime:
-            server.prime,
-
-        menuHide:
-            server.menuHide,
-
-        serverLocked:
-            server.serverLocked,
-
-        updateMigrating:
-            server.updateMigrating,
-
-        rules:
-            server.rules
+        privateServerId: server.privateServerId,
+        accessCode: server.accessCode,
+        players: server.players,
+        playerIds: server.playerIds,
+        playerList: server.playerList,
+        maxPlayers: server.maxPlayers,
+        region: server.region,
+        countryCode: server.countryCode,
+        lat: server.lat,
+        lon: server.lon,
+        gameMode: server.gameMode,
+        vip: server.vip,
+        vipOwner: server.vipOwner,
+        map: server.map,
+        prime: server.prime,
+        menuHide: server.menuHide,
+        serverLocked: server.serverLocked,
+        updateMigrating: server.updateMigrating,
+        rules: server.rules
     };
 }
-
-/*
-============================================================
-HEALTH
-============================================================
-*/
 
 app.get("/", (req, res) => {
     res.json({
@@ -343,14 +250,6 @@ app.get("/health", (req, res) => {
     });
 });
 
-/*
-============================================================
-GET /v1/servers
-
-Used by the ServerList hub/browser.
-============================================================
-*/
-
 app.get(
     "/v1/servers",
     authenticate,
@@ -369,25 +268,14 @@ app.get(
         const result = [];
 
         for (const server of servers.values()) {
-
             if (!server.jobId) {
                 continue;
             }
 
-            /*
-            Hide VIP servers unless requested.
-            */
-
             if (server.vip) {
-
                 if (!includeVip) {
                     continue;
                 }
-
-                /*
-                If a specific VIP owner was requested,
-                only return that owner's VIP server.
-                */
 
                 if (
                     vipOwner !== null &&
@@ -402,10 +290,6 @@ app.get(
             );
         }
 
-        /*
-        Active/populated servers first.
-        */
-
         result.sort((a, b) => {
             return (
                 Number(b.players || 0) -
@@ -419,21 +303,10 @@ app.get(
     }
 );
 
-/*
-============================================================
-POST /v1/servers/heartbeat
-
-Used by:
-
-Net.Beat(payload)
-============================================================
-*/
-
 app.post(
     "/v1/servers/heartbeat",
     authenticate,
     (req, res) => {
-
         cleanup();
 
         const body = req.body || {};
@@ -465,21 +338,10 @@ app.post(
     }
 );
 
-/*
-============================================================
-DELETE /v1/servers/:jobId
-
-Used by:
-
-Net.Drop(jobId)
-============================================================
-*/
-
 app.delete(
     "/v1/servers/:jobId",
     authenticate,
     (req, res) => {
-
         const jobId =
             stringValue(req.params.jobId);
 
@@ -500,21 +362,10 @@ app.delete(
     }
 );
 
-/*
-============================================================
-POST /v1/rules
-
-Used by:
-
-Net.PutRules(jobId, rules, placeId)
-============================================================
-*/
-
 app.post(
     "/v1/rules",
     authenticate,
     (req, res) => {
-
         const body = req.body || {};
 
         const ticket =
@@ -562,21 +413,10 @@ app.post(
     }
 );
 
-/*
-============================================================
-GET /v1/rules/:jobId
-
-Used by:
-
-Net.GetRules(jobId)
-============================================================
-*/
-
 app.get(
     "/v1/rules/:jobId",
     authenticate,
     (req, res) => {
-
         cleanup();
 
         const ticket =
@@ -599,21 +439,10 @@ app.get(
     }
 );
 
-/*
-============================================================
-POST /v1/intent
-
-Used by:
-
-Net.PutIntent(...)
-============================================================
-*/
-
 app.post(
     "/v1/intent",
     authenticate,
     (req, res) => {
-
         const body = req.body || {};
 
         const userId =
@@ -677,10 +506,6 @@ app.post(
                 Date.now()
         };
 
-        /*
-        One pending intent per user.
-        */
-
         intents.set(
             String(userId),
             entry
@@ -695,27 +520,10 @@ app.post(
     }
 );
 
-/*
-============================================================
-GET /v1/intent/:userId
-
-Used by:
-
-Net.TakeIntent(userId)
-
-The Roblox code sends:
-
-?consume=1
-
-When consume=1, remove the intent after returning it.
-============================================================
-*/
-
 app.get(
     "/v1/intent/:userId",
     authenticate,
     (req, res) => {
-
         cleanup();
 
         const userId =
@@ -772,21 +580,10 @@ app.get(
     }
 );
 
-/*
-============================================================
-GET /v1/admins
-
-Used by the Hub:
-
-Net.GetAdmins()
-============================================================
-*/
-
 app.get(
     "/v1/admins",
     authenticate,
     (req, res) => {
-
         res.json({
             levelsByName:
                 admins
@@ -794,21 +591,10 @@ app.get(
     }
 );
 
-/*
-============================================================
-PUT /v1/admins
-
-Used by the main game:
-
-Net.PutAdmins(levelsByName)
-============================================================
-*/
-
 app.put(
     "/v1/admins",
     authenticate,
     (req, res) => {
-
         const body =
             req.body || {};
 
@@ -830,7 +616,6 @@ app.put(
                 body.levelsByName
             )
         ) {
-
             if (
                 typeof name !== "string" ||
                 name.trim() === ""
@@ -863,22 +648,10 @@ app.put(
     }
 );
 
-/*
-============================================================
-CLEANUP LOOP
-============================================================
-*/
-
 setInterval(
     cleanup,
     10 * 1000
 );
-
-/*
-============================================================
-404
-============================================================
-*/
 
 app.use(
     (req, res) => {
@@ -888,15 +661,8 @@ app.use(
     }
 );
 
-/*
-============================================================
-ERROR HANDLER
-============================================================
-*/
-
 app.use(
     (err, req, res, next) => {
-
         console.error(
             "API ERROR:",
             err
@@ -908,12 +674,6 @@ app.use(
         });
     }
 );
-
-/*
-============================================================
-START
-============================================================
-*/
 
 app.listen(
     PORT,
